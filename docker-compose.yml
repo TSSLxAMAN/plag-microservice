@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  plag-microservice:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: plag-microservice
+    ports:
+      - "8002:8002"
+    environment:
+      - DEBUG=False
+      - HOST=0.0.0.0
+      - PORT=8002
+      - CHROMA_DB_PATH=/app/chroma_db
+    volumes:
+      # Persist ChromaDB data
+      - ./chroma_db:/app/chroma_db
+      # Mount app code for development (comment out for production)
+      - ./app:/app/app
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - microservice-network
+
+networks:
+  microservice-network:
+    driver: bridge
