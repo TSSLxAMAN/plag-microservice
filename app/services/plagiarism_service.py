@@ -139,12 +139,8 @@ class PlagiarismService:
             return PlagiarismStatus.VERY_HIGH_RISK, marks, "Very high plagiarism risk"
         
         else:
-            # >= 0.96: Copied
-            # Assign marks between 0-1
-            marks = max(0.0, 1.0 - (similarity_score - settings.THRESHOLD_VERY_HIGH) / 
-                       (1.0 - settings.THRESHOLD_VERY_HIGH))
-            marks = round(marks, 1)
-            return PlagiarismStatus.COPIED, marks, "Plagiarism detected"
+            return PlagiarismStatus.COPIED, 0.0, "Plagiarism detected"
+
     
     def check_plagiarism(
         self, 
@@ -225,7 +221,7 @@ class PlagiarismService:
                 
                 # Determine if this is the earliest among highly similar submissions
                 is_earliest = True
-                if max_similarity >= settings.THRESHOLD_VERY_HIGH:
+                if max_similarity >= settings.THRESHOLD_SUSPICIOUS:
                     # Check if any similar assignment was submitted earlier
                     for detail in similarity_details:
                         if (detail.similarity_score >= settings.THRESHOLD_VERY_HIGH and 
@@ -241,18 +237,24 @@ class PlagiarismService:
                 
                 # Sort similarity details by score (descending)
                 similarity_details.sort(key=lambda x: x.similarity_score, reverse=True)
-                
-                # Create result
+                penalty = self.similarity_to_penalty(max_similarity)
+
                 result = AssignmentResult(
                     assignment_id=assignment_i.assignment_id,
                     student_id=assignment_i.student_id,
-                    plagiarism_score=round(max_similarity, 4),
+                    max_similarity=round(max_similarity, 4),
+                    plagiarism_score=penalty,
                     marks=marks,
                     status=status,
-                    most_similar_to=most_similar_id if max_similarity >= settings.THRESHOLD_SUSPICIOUS else None,
-                    similarity_details=similarity_details[:5],  # Top 5 similar assignments
+                    most_similar_to = (
+                        most_similar_id 
+                        if status not in [PlagiarismStatus.ORIGINAL, PlagiarismStatus.VERY_LOW_RISK]
+                        else None
+                    ),
+                    similarity_details=similarity_details[:5],
                     message=message
                 )
+
                 results.append(result)
             
             return results
@@ -283,3 +285,18 @@ class PlagiarismService:
         
         except Exception as e:
             return {"status": "unhealthy", "reason": str(e)}
+    
+    def similarity_to_penalty(self, similarity: float) -> float:
+        """
+        Converts similarity score → plagiarism penalty (0-1)
+        """
+        if similarity < settings.THRESHOLD_LOW:
+            return 0.0
+        elif similarity < settings.THRESHOLD_SUSPICIOUS:
+            return 0.3
+        elif similarity < settings.THRESHOLD_HIGH:
+            return 0.6
+        elif similarity < settings.THRESHOLD_VERY_HIGH:
+            return 0.8
+        else:
+            return 1.0

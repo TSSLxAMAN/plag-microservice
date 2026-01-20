@@ -76,20 +76,22 @@ class SimilarityDetail(BaseModel):
 class AssignmentResult(BaseModel):
     assignment_id: str
     student_id: str
+
+    max_similarity: float = Field(
+        description="Maximum similarity score found (0-1)"
+    )
+
     plagiarism_score: float = Field(
-        description="Highest similarity score found (0-1 scale)"
+        ge=0, le=1,
+        description="Plagiarism penalty score (0 = clean, 1 = fully plagiarized)"
     )
-    marks: float = Field(ge=0, le=10, description="Marks assigned (0-10)")
+
+    marks: float = Field(ge=0, le=10)
     status: PlagiarismStatus
-    most_similar_to: Optional[str] = Field(
-        None, 
-        description="Assignment ID of most similar submission"
-    )
-    similarity_details: List[SimilarityDetail] = Field(
-        default_factory=list,
-        description="Detailed similarity comparisons with other assignments"
-    )
+    most_similar_to: Optional[str] = None
+    similarity_details: List[SimilarityDetail] = []
     message: Optional[str] = None
+
 
 
 class PlagiarismCheckResponse(BaseModel):
