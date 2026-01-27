@@ -81,6 +81,7 @@ async def check_plagiarism(request: PlagiarismCheckRequest):
             assignment_group_id=request.assignment_group_id
         )
         
+        
         processing_time = round(time.time() - start_time, 2)
         
         logger.info(
@@ -88,21 +89,13 @@ async def check_plagiarism(request: PlagiarismCheckRequest):
             f"Processed {len(results)} assignments"
         )
         
-        # Log summary statistics
-        copied_count = sum(1 for r in results if r.status == "COPIED")
-        high_risk_count = sum(1 for r in results if r.status in ["HIGH RISK", "VERY HIGH RISK"])
+       
         
-        if copied_count > 0 or high_risk_count > 0:
-            logger.warning(
-                f"Plagiarism detected: {copied_count} copied, {high_risk_count} high risk"
-            )
+        
         
         return PlagiarismCheckResponse(
             success=True,
-            assignment_group_id=request.assignment_group_id,
-            total_assignments_checked=len(results),
-            results=results,
-            processing_time_seconds=processing_time
+            results=results
         )
     
     except HTTPException:

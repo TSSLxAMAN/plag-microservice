@@ -92,40 +92,23 @@ class AssignmentResult(BaseModel):
     similarity_details: List[SimilarityDetail] = []
     message: Optional[str] = None
 
-
-
-class PlagiarismCheckResponse(BaseModel):
-    success: bool
-    assignment_group_id: str
-    total_assignments_checked: int
-    results: List[AssignmentResult]
-    processing_time_seconds: float
-    
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "success": True,
-                "assignment_group_id": "assignment_001",
-                "total_assignments_checked": 2,
-                "processing_time_seconds": 1.23,
-                "results": [
-                    {
-                        "assignment_id": "sub_001",
-                        "student_id": "student_a",
-                        "plagiarism_score": 0.65,
-                        "marks": 10.0,
-                        "status": "ORIGINAL",
-                        "most_similar_to": None,
-                        "similarity_details": [],
-                        "message": "Original work"
-                    }
-                ]
-            }
-        }
-
-
 class HealthCheckResponse(BaseModel):
     status: str
     service: str
     version: str
     chroma_db_status: str
+
+class SimplifiedAssignmentResult(BaseModel):
+    assignment_id: str
+    student_id: str
+    max_similarity: float = Field(
+        description="The highest similarity score found against the batch (0.0 to 1.0)"
+    )
+    plagiarism_score: float = Field(
+        description="Calculated penalty score (0.0 = clean, 1.0 = fully plagiarized)"
+    )
+    status: PlagiarismStatus
+
+class PlagiarismCheckResponse(BaseModel):
+    success: bool
+    results: List[SimplifiedAssignmentResult]

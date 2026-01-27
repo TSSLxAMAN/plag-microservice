@@ -11,7 +11,8 @@ from app.models import (
     AssignmentInput,
     AssignmentResult,
     PlagiarismStatus,
-    SimilarityDetail
+    SimilarityDetail,
+    SimplifiedAssignmentResult
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -94,67 +95,69 @@ class PlagiarismService:
             return 0.0
     
     def get_plagiarism_status_and_marks(
-        self, 
-        similarity_score: float, 
-        is_earliest: bool
-    ) -> Tuple[PlagiarismStatus, float, str]:
-        """
-        Determine plagiarism status and marks based on similarity score
-        
-        Returns: (status, marks, message)
-        """
-        # If this is the earliest submission with high similarity, mark as original
-        if is_earliest and similarity_score >= settings.THRESHOLD_VERY_HIGH:
-            return PlagiarismStatus.ORIGINAL, 10.0, "Original submission (submitted first)"
-        
-        # Apply thresholds
-        if similarity_score < settings.THRESHOLD_ORIGINAL:
-            return PlagiarismStatus.ORIGINAL, 10.0, "Original work"
-        
-        elif similarity_score < settings.THRESHOLD_VERY_LOW:
-            return PlagiarismStatus.VERY_LOW_RISK, 9.0, "Very low plagiarism risk"
-        
-        elif similarity_score < settings.THRESHOLD_LOW:
-            return PlagiarismStatus.LOW_RISK, 8.0, "Low plagiarism risk"
-        
-        elif similarity_score < settings.THRESHOLD_SUSPICIOUS:
-            # Assign marks between 6-7 based on position in range
-            marks = 7.0 - (similarity_score - settings.THRESHOLD_LOW) / \
-                    (settings.THRESHOLD_SUSPICIOUS - settings.THRESHOLD_LOW)
-            marks = round(marks, 1)
-            return PlagiarismStatus.SUSPICIOUS, marks, "Suspicious similarity detected"
-        
-        elif similarity_score < settings.THRESHOLD_HIGH:
-            # Assign marks between 4-5
-            marks = 5.0 - (similarity_score - settings.THRESHOLD_SUSPICIOUS) / \
-                    (settings.THRESHOLD_HIGH - settings.THRESHOLD_SUSPICIOUS)
-            marks = round(marks, 1)
-            return PlagiarismStatus.HIGH_RISK, marks, "High plagiarism risk"
-        
-        elif similarity_score < settings.THRESHOLD_VERY_HIGH:
-            # Assign marks between 2-3
-            marks = 3.0 - (similarity_score - settings.THRESHOLD_HIGH) / \
-                    (settings.THRESHOLD_VERY_HIGH - settings.THRESHOLD_HIGH)
-            marks = round(marks, 1)
-            return PlagiarismStatus.VERY_HIGH_RISK, marks, "Very high plagiarism risk"
-        
-        else:
-            return PlagiarismStatus.COPIED, 0.0, "Plagiarism detected"
+            self, 
+            similarity_score: float, 
+            is_earliest: bool
+        ) -> Tuple[PlagiarismStatus, float, str]:
+            """
+            Determine plagiarism status and marks based on similarity score
+            
+            Returns: (status, marks, message)
+            """
+            # 🔥 FIX: Lower the threshold for the earliest submitter. 
+            # If they are first and have ANY suspicious similarity, they are the 'Source' (Victim).
+            # We check against THRESHOLD_SUSPICIOUS instead of THRESHOLD_VERY_HIGH.
+            if is_earliest and similarity_score >= settings.THRESHOLD_SUSPICIOUS:
+                return PlagiarismStatus.ORIGINAL, 10.0, "Original submission (Source of potential copies)"
+            
+            # Apply standard thresholds
+            if similarity_score < settings.THRESHOLD_ORIGINAL:
+                return PlagiarismStatus.ORIGINAL, 10.0, "Original work"
+            
+            elif similarity_score < settings.THRESHOLD_VERY_LOW:
+                return PlagiarismStatus.VERY_LOW_RISK, 9.0, "Very low plagiarism risk"
+            
+            elif similarity_score < settings.THRESHOLD_LOW:
+                return PlagiarismStatus.LOW_RISK, 8.0, "Low plagiarism risk"
+            
+            elif similarity_score < settings.THRESHOLD_SUSPICIOUS:
+                # Assign marks between 6-7 based on position in range
+                marks = 7.0 - (similarity_score - settings.THRESHOLD_LOW) / \
+                        (settings.THRESHOLD_SUSPICIOUS - settings.THRESHOLD_LOW)
+                marks = round(marks, 1)
+                return PlagiarismStatus.SUSPICIOUS, marks, "Suspicious similarity detected"
+            
+            elif similarity_score < settings.THRESHOLD_HIGH:
+                # Assign marks between 4-5
+                marks = 5.0 - (similarity_score - settings.THRESHOLD_SUSPICIOUS) / \
+                        (settings.THRESHOLD_HIGH - settings.THRESHOLD_SUSPICIOUS)
+                marks = round(marks, 1)
+                return PlagiarismStatus.HIGH_RISK, marks, "High plagiarism risk"
+            
+            elif similarity_score < settings.THRESHOLD_VERY_HIGH:
+                # Assign marks between 2-3
+                marks = 3.0 - (similarity_score - settings.THRESHOLD_HIGH) / \
+                        (settings.THRESHOLD_VERY_HIGH - settings.THRESHOLD_HIGH)
+                marks = round(marks, 1)
+                return PlagiarismStatus.VERY_HIGH_RISK, marks, "Very high plagiarism risk"
+            
+            else:
+                return PlagiarismStatus.COPIED, 0.0, "Plagiarism detected"
 
     
     def check_plagiarism(
-        self, 
-        assignments: List[AssignmentInput],
-        assignment_group_id: str
-    ) -> List[AssignmentResult]:
+    self, 
+    assignments: List[AssignmentInput],
+    assignment_group_id: str
+) -> List[SimplifiedAssignmentResult]:
         """
-        Main method to check plagiarism across multiple assignments
+        Check plagiarism and return only scores and status.
         """
         try:
-            # Sort assignments by submission time
+            # 1. Sort by submission time (Critical for determining original author)
             sorted_assignments = sorted(assignments, key=lambda x: x.submitted_at)
             
-            # Generate embeddings for all assignments
+            # 2. Generate embeddings
             embeddings_data = []
             for assignment in sorted_assignments:
                 embedding = self.generate_embedding(assignment.extracted_text)
@@ -163,27 +166,21 @@ class PlagiarismService:
                         "assignment": assignment,
                         "embedding": embedding
                     })
-                else:
-                    logger.warning(
-                        f"Failed to generate embedding for assignment: {assignment.assignment_id}"
-                    )
             
+            # Handle insufficient data
             if len(embeddings_data) < 2:
-                logger.warning("Not enough valid assignments to compare")
-                # Return all as original if less than 2
                 return [
-                    AssignmentResult(
+                    SimplifiedAssignmentResult(
                         assignment_id=a.assignment_id,
                         student_id=a.student_id,
+                        max_similarity=0.0,
                         plagiarism_score=0.0,
-                        marks=10.0,
-                        status=PlagiarismStatus.ORIGINAL,
-                        message="Insufficient assignments for comparison"
+                        status=PlagiarismStatus.ORIGINAL
                     )
                     for a in assignments
                 ]
             
-            # Compare each assignment with all others
+            # 3. Compare All-vs-All
             results = []
             
             for i, data_i in enumerate(embeddings_data):
@@ -191,74 +188,60 @@ class PlagiarismService:
                 embedding_i = data_i["embedding"]
                 
                 max_similarity = 0.0
-                most_similar_id = None
-                similarity_details = []
+                similarity_details_buffer = [] # Temp list to check "earliest" logic
                 
-                # Compare with all other assignments
+                # Compare with all others
                 for j, data_j in enumerate(embeddings_data):
-                    if i == j:
-                        continue
+                    if i == j: continue
                     
                     assignment_j = data_j["assignment"]
                     embedding_j = data_j["embedding"]
                     
-                    # Calculate similarity
-                    similarity = self.calculate_similarity(embedding_i, embedding_j)
+                    sim = self.calculate_similarity(embedding_i, embedding_j)
                     
-                    # Store similarity detail
-                    similarity_detail = SimilarityDetail(
-                        compared_with_assignment_id=assignment_j.assignment_id,
-                        compared_with_student_id=assignment_j.student_id,
-                        similarity_score=round(similarity, 4),
-                        submitted_earlier=(assignment_j.submitted_at < assignment_i.submitted_at)
-                    )
-                    similarity_details.append(similarity_detail)
+                    if sim > max_similarity:
+                        max_similarity = sim
                     
-                    # Track maximum similarity
-                    if similarity > max_similarity:
-                        max_similarity = similarity
-                        most_similar_id = assignment_j.assignment_id
+                    # We still need this small check to determine if 'i' is the original author
+                    similarity_details_buffer.append({
+                        "score": sim,
+                        "is_older": assignment_j.submitted_at < assignment_i.submitted_at
+                    })
                 
-                # Determine if this is the earliest among highly similar submissions
-                is_earliest = True
+                # 4. Determine "Originality"
+                # If this assignment is highly similar (>THRESHOLD) BUT exists an older submission 
+                # with high similarity, then THIS one is the copy. 
+                # If this is the oldest, it stays ORIGINAL.
+                is_original_author = True
                 if max_similarity >= settings.THRESHOLD_SUSPICIOUS:
-                    # Check if any similar assignment was submitted earlier
-                    for detail in similarity_details:
-                        if (detail.similarity_score >= settings.THRESHOLD_VERY_HIGH and 
-                            detail.submitted_earlier):
-                            is_earliest = False
+                    for detail in similarity_details_buffer:
+                        if detail["score"] >= settings.THRESHOLD_VERY_HIGH and detail["is_older"]:
+                            is_original_author = False
                             break
                 
-                # Get status and marks
-                status, marks, message = self.get_plagiarism_status_and_marks(
-                    max_similarity, 
-                    is_earliest
-                )
-                
-                # Sort similarity details by score (descending)
-                similarity_details.sort(key=lambda x: x.similarity_score, reverse=True)
+                # 5. Get Status and Penalty
+                # We treat 'is_earliest' logic inside the status getter
+                status, _, _ = self.get_plagiarism_status_and_marks(max_similarity, is_original_author)
                 penalty = self.similarity_to_penalty(max_similarity)
 
-                result = AssignmentResult(
+                # Override penalty for the original author
+                if status == PlagiarismStatus.ORIGINAL:
+                    penalty = 0.0
+                    max_similarity = 0.0 # Optional: Set sim to 0 for the original source to avoid confusion
+
+                # 6. Construct Simplified Result
+                result = SimplifiedAssignmentResult(
                     assignment_id=assignment_i.assignment_id,
                     student_id=assignment_i.student_id,
                     max_similarity=round(max_similarity, 4),
                     plagiarism_score=penalty,
-                    marks=marks,
-                    status=status,
-                    most_similar_to = (
-                        most_similar_id 
-                        if status not in [PlagiarismStatus.ORIGINAL, PlagiarismStatus.VERY_LOW_RISK]
-                        else None
-                    ),
-                    similarity_details=similarity_details[:5],
-                    message=message
+                    status=status
                 )
-
+                
                 results.append(result)
-            
+                
             return results
-        
+
         except Exception as e:
             logger.error(f"Error in plagiarism check: {str(e)}")
             raise
