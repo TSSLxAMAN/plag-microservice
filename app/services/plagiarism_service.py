@@ -1,3 +1,4 @@
+import re
 import chromadb
 from chromadb.config import Settings as ChromaSettings
 from sentence_transformers import SentenceTransformer
@@ -144,6 +145,38 @@ class PlagiarismService:
             else:
                 return PlagiarismStatus.COPIED, 0.0, "Plagiarism detected"
 
+    def _extract_answers_only(self, text: str) -> str:
+        """
+        Parses the full text and returns ONLY the student's answers concatenated together.
+        Removes all questions and numbering.
+        """
+        clean_answers = []
+        
+        # Split by Question Numbers (e.g. "1.", "2.")
+        fragments = re.split(r'(?=\d+\.\s)', text)
+        
+        for fragment in fragments:
+            # Look for the "Ans -" marker
+            parts = re.split(r'\s*Ans\s*[-–]\s*', fragment, flags=re.IGNORECASE)
+            
+            if len(parts) >= 2:
+                # part[0] is the Question (Discard)
+                # part[1] is the Answer (Keep)
+                answer_text = parts[1].strip()
+                if answer_text:
+                    clean_answers.append(answer_text)
+            else:
+                # Fallback: If no "Ans -" found, skip or keep specific logic
+                # For safety, if we can't separate, we might skip to avoid noise
+                pass
+                
+        # Join all answers into one block of text
+        if not clean_answers:
+            # Fallback: If parsing failed completely, return original text 
+            # (Better to check full text than nothing)
+            return text
+            
+        return " ".join(clean_answers)
     
     def check_plagiarism(
     self, 
@@ -160,7 +193,15 @@ class PlagiarismService:
             # 2. Generate embeddings
             embeddings_data = []
             for assignment in sorted_assignments:
-                embedding = self.generate_embedding(assignment.extracted_text)
+                # --- NEW STEP: Pre-process to remove questions ---
+                # We only want to compare what the student WROTE, not what they read.
+                cleaned_text = self._extract_answers_only(assignment.extracted_text)
+                print(cleaned_text)
+                # Log usage for debugging
+                if len(cleaned_text) < len(assignment.extracted_text):
+                    logger.info(f"Cleaned Assignment {assignment.assignment_id}: Length {len(assignment.extracted_text)} -> {len(cleaned_text)}")
+
+                embedding = self.generate_embedding(cleaned_text)
                 if embedding:
                     embeddings_data.append({
                         "assignment": assignment,
@@ -180,7 +221,23 @@ class PlagiarismService:
                     for a in assignments
                 ]
             
-            # 3. Compare All-vs-All
+            # --- NEW STEP: Pre-calculate "Connection Counts" ---
+            # We want to know: "How many people did this person match with?"
+            suspicious_connections = {data["assignment"].assignment_id: 0 for data in embeddings_data}
+            
+            # Double loop to count connections > THRESHOLD_SUSPICIOUS
+            for i, data_i in enumerate(embeddings_data):
+                for j, data_j in enumerate(embeddings_data):
+                    if i == j: continue
+                    
+                    sim = self.calculate_similarity(data_i["embedding"], data_j["embedding"])
+                    if sim >= settings.THRESHOLD_SUSPICIOUS:
+                        suspicious_connections[data_i["assignment"].assignment_id] += 1
+            
+            # Define a "Cluster Threshold". If you match > 2 people, it's likely an External Source.
+            EXTERNAL_SOURCE_THRESHOLD = 2 
+
+            # 3. Compare All-vs-All (Main Logic)
             results = []
             
             for i, data_i in enumerate(embeddings_data):
@@ -188,57 +245,66 @@ class PlagiarismService:
                 embedding_i = data_i["embedding"]
                 
                 max_similarity = 0.0
-                similarity_details_buffer = [] # Temp list to check "earliest" logic
+                matched_older_student = False
                 
-                # Compare with all others
+                # Check against all others
                 for j, data_j in enumerate(embeddings_data):
                     if i == j: continue
                     
-                    assignment_j = data_j["assignment"]
-                    embedding_j = data_j["embedding"]
-                    
-                    sim = self.calculate_similarity(embedding_i, embedding_j)
+                    sim = self.calculate_similarity(embedding_i, data_j["embedding"])
                     
                     if sim > max_similarity:
                         max_similarity = sim
                     
-                    # We still need this small check to determine if 'i' is the original author
-                    similarity_details_buffer.append({
-                        "score": sim,
-                        "is_older": assignment_j.submitted_at < assignment_i.submitted_at
-                    })
+                    # Track if they matched someone older
+                    if sim >= settings.THRESHOLD_SUSPICIOUS:
+                        if data_j["assignment"].submitted_at < assignment_i.submitted_at:
+                            matched_older_student = True
                 
-                # 4. Determine "Originality"
-                # If this assignment is highly similar (>THRESHOLD) BUT exists an older submission 
-                # with high similarity, then THIS one is the copy. 
-                # If this is the oldest, it stays ORIGINAL.
-                is_original_author = True
-                if max_similarity >= settings.THRESHOLD_SUSPICIOUS:
-                    for detail in similarity_details_buffer:
-                        if detail["score"] >= settings.THRESHOLD_VERY_HIGH and detail["is_older"]:
-                            is_original_author = False
-                            break
-                
-                # 5. Get Status and Penalty
-                # We treat 'is_earliest' logic inside the status getter
-                status, _, _ = self.get_plagiarism_status_and_marks(max_similarity, is_original_author)
-                penalty = self.similarity_to_penalty(max_similarity)
+                # 4. Determine Status (The Updated Logic)
+                is_original = False
+                status = PlagiarismStatus.ORIGINAL
+                penalty = 0.0
 
-                # Override penalty for the original author
-                if status == PlagiarismStatus.ORIGINAL:
+                # CHECK 1: Is the similarity low? -> Safe
+                if max_similarity < settings.THRESHOLD_SUSPICIOUS:
+                    is_original = True
+                    status = PlagiarismStatus.ORIGINAL
+                
+                # CHECK 2: The "Cluster Rule" (Anti-ChatGPT Fix)
+                # If this student matches 3+ people, NO ONE is original. Everyone is suspect.
+                elif suspicious_connections[assignment_i.assignment_id] > EXTERNAL_SOURCE_THRESHOLD:
+                    is_original = False
+                    status = PlagiarismStatus.HIGH_RISK # Or create a new status: "EXTERNAL_SOURCE_LIKELY"
+                    penalty = 0.5 # Give them all a partial penalty (e.g., 50%)
+                
+                # CHECK 3: The "Time Rule" (Peer-to-Peer Fix)
+                # If valid connection count is small (1-2 people), apply strict Time Rule
+                else:
+                    if not matched_older_student:
+                        # You are the first! You are likely the victim.
+                        is_original = True
+                        status = PlagiarismStatus.ORIGINAL
+                    else:
+                        # You matched someone older. You are the copier.
+                        is_original = False
+                        # Use your existing function to get detailed status
+                        status, _, _ = self.get_plagiarism_status_and_marks(max_similarity, False)
+                        penalty = self.similarity_to_penalty(max_similarity)
+
+                # Override penalty if Original
+                if is_original:
                     penalty = 0.0
-                    max_similarity = 0.0 # Optional: Set sim to 0 for the original source to avoid confusion
+                    max_similarity = 0.0
 
-                # 6. Construct Simplified Result
-                result = SimplifiedAssignmentResult(
+                # 5. Construct Result
+                results.append(SimplifiedAssignmentResult(
                     assignment_id=assignment_i.assignment_id,
                     student_id=assignment_i.student_id,
                     max_similarity=round(max_similarity, 4),
                     plagiarism_score=penalty,
                     status=status
-                )
-                
-                results.append(result)
+                ))
                 
             return results
 
