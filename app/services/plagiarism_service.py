@@ -1,3 +1,4 @@
+import ast
 import re
 import chromadb
 from chromadb.config import Settings as ChromaSettings
@@ -6,6 +7,7 @@ from typing import List, Dict, Tuple, Optional
 import numpy as np
 from datetime import datetime
 import logging
+import json
 
 from app.config import settings
 from app.models import (
@@ -145,37 +147,119 @@ class PlagiarismService:
             else:
                 return PlagiarismStatus.COPIED, 0.0, "Plagiarism detected"
 
-    def _extract_answers_only(self, text: str) -> str:
+    def _resolve_input_to_text(self, data) -> str:
         """
-        Parses the full text and returns ONLY the student's answers concatenated together.
-        Removes all questions and numbering.
+        Intelligently extracts the raw text string from:
+        - A dictionary (e.g. {'extracted_text': '...'})
+        - A list (e.g. [{'extracted_text': '...'}])
+        - A JSON string representing the above
+        - A plain string
         """
+        # 1. Handle Dictionaries (Direct or Nested)
+        if isinstance(data, dict):
+            if 'extracted_text' in data:
+                return data['extracted_text']
+            # Fallback: Check if it's inside an 'assignments' list
+            if 'assignments' in data and isinstance(data['assignments'], list):
+                # Join all assignment texts found
+                texts = [self._resolve_input_to_text(a) for a in data['assignments']]
+                return "\n\n".join(filter(None, texts))
+            return ""
+
+        # 2. Handle Lists (Process each item)
+        if isinstance(data, list):
+            texts = [self._resolve_input_to_text(item) for item in data]
+            return "\n\n".join(filter(None, texts))
+
+        # 3. Handle Strings (Could be JSON or Python Dict String)
+        if isinstance(data, str):
+            stripped = data.strip()
+            # Try parsing as JSON first
+            if stripped.startswith(('{', '[')):
+                try:
+                    parsed = json.loads(data)
+                    return self._resolve_input_to_text(parsed)
+                except json.JSONDecodeError:
+                    # If JSON fails, try Python literal eval (for single-quoted dict strings)
+                    try:
+                        parsed = ast.literal_eval(data)
+                        return self._resolve_input_to_text(parsed)
+                    except (ValueError, SyntaxError):
+                        pass
+            
+            # If it's just plain text, return it
+            return data
+
+        return ""
+
+    def _extract_answers_only(self, raw_input) -> str:
+        """
+        Robustly parses input to return ONLY the student's answers.
+        """
+        # STEP 0: Resolve the input to actual text (Fixes the dictionary issue)
+        text = self._resolve_input_to_text(raw_input)
+        
+        if not text:
+            return ""
+
         clean_answers = []
-        
-        # Split by Question Numbers (e.g. "1.", "2.")
-        fragments = re.split(r'(?=\d+\.\s)', text)
-        
+
+        # 1. CLEANUP HEADERS (Skip student metadata)
+        match_start = re.search(r'(?:Question|Q|Section)\s*1\s*[:\.\)\-]|(?<=^)\s*1\.|(?<=\n)\s*1\.', text, re.IGNORECASE)
+        if match_start:
+            text = text[match_start.start():]
+
+        # 2. NORMALIZE QUESTION DELIMITERS
+        text = re.sub(
+            r'(?i)([\.\?!]\s*|\n|^)(?:Question\s*\d+|Q\.?\s*\d+|Section\s*\d+|\d+)\s*[:\.\)\-]', 
+            r'\1\n__SPLIT__QUESTION__\n', 
+            text
+        )
+
+        # 3. SPLIT INTO FRAGMENTS
+        fragments = text.split('__SPLIT__QUESTION__')
+
         for fragment in fragments:
-            # Look for the "Ans -" marker
-            parts = re.split(r'\s*Ans\s*[-–]\s*', fragment, flags=re.IGNORECASE)
+            if not fragment.strip():
+                continue
+
+            # 4. STRATEGY A: Look for Explicit "Answer" Markers
+            answer_parts = re.split(
+                r'(?i)(?:Ans|Answer|A|Sol|Solution)\s*[:\-\–\.]', 
+                fragment, 
+                maxsplit=1
+            )
+
+            if len(answer_parts) > 1:
+                raw_answer = answer_parts[1].strip()
+                if raw_answer:
+                    clean_answers.append(raw_answer)
             
-            if len(parts) >= 2:
-                # part[0] is the Question (Discard)
-                # part[1] is the Answer (Keep)
-                answer_text = parts[1].strip()
-                if answer_text:
-                    clean_answers.append(answer_text)
             else:
-                # Fallback: If no "Ans -" found, skip or keep specific logic
-                # For safety, if we can't separate, we might skip to avoid noise
-                pass
+                # 5. STRATEGY B: No Marker Found (Heuristic Cleanup)
+                content = fragment.strip()
                 
-        # Join all answers into one block of text
+                # 5a. Split by Question Mark
+                q_match = re.search(r'\?', content)
+                if q_match and q_match.start() < 300:
+                    possible_answer = content[q_match.end():].strip()
+                    if possible_answer:
+                        clean_answers.append(possible_answer)
+                        continue
+
+                # 5b. Split by Command Verbs
+                command_pattern = r'^(?:Explain|Define|Describe|Discuss|Compare|What|Why|How|List|Calculate)\b.*?(?:[\.\n]|$)'
+                match_command = re.match(command_pattern, content, re.IGNORECASE | re.DOTALL)
+                
+                if match_command:
+                    content = content[match_command.end():].strip()
+
+                if len(content) > 1:
+                    clean_answers.append(content)
+
         if not clean_answers:
-            # Fallback: If parsing failed completely, return original text 
-            # (Better to check full text than nothing)
-            return text
-            
+            return text.strip()
+
         return " ".join(clean_answers)
     
     def check_plagiarism(

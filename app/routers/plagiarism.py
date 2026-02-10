@@ -45,11 +45,6 @@ async def check_plagiarism(request: PlagiarismCheckRequest):
     try:
         start_time = time.time()
         
-        logger.info(
-            f"Received plagiarism check request for assignment group: "
-            f"{request.assignment_group_id} with {len(request.assignments)} assignments"
-        )
-        
         # Validate minimum assignments
         if len(request.assignments) < 2:
             raise HTTPException(
